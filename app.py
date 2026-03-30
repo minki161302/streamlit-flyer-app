@@ -1,7 +1,7 @@
 import base64
+import hashlib
 import io
 import json
-from copy import deepcopy
 from pathlib import Path
 
 import streamlit as st
@@ -15,12 +15,20 @@ PAGES = [
     {"name": "page1", "file": "data/page1.jpg"},
     {"name": "page2", "file": "data/page2.jpg"},
     {"name": "page3", "file": "data/page3.jpg"},
+    {"name": "page4", "file": "data/page4.jpg"},
 ]
 
 BLOCKS_FILE = Path("data/blocks.json")
 
 DISPLAY_MAX_W = 410
 DISPLAY_MAX_H = 700
+
+
+def get_blocks_file_signature() -> str:
+    if not BLOCKS_FILE.exists():
+        return "missing"
+    data = BLOCKS_FILE.read_bytes()
+    return hashlib.md5(data).hexdigest()
 
 
 def read_blocks_from_disk() -> dict:
@@ -119,14 +127,29 @@ def bytes_to_data_uri(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64,{encoded}"
 
 
+# -----------------------------
+# Session state init
+# -----------------------------
 if "page_idx" not in st.session_state:
     st.session_state.page_idx = 0
 
+current_sig = get_blocks_file_signature()
+
+if "blocks_file_sig" not in st.session_state:
+    st.session_state.blocks_file_sig = current_sig
+
 if "blocks" not in st.session_state:
-    st.session_state.blocks = deepcopy(read_blocks_from_disk())
+    st.session_state.blocks = read_blocks_from_disk()
+elif st.session_state.blocks_file_sig != current_sig:
+    # 파일이 바뀌었으면 자동 반영
+    st.session_state.blocks = read_blocks_from_disk()
+    st.session_state.blocks_file_sig = current_sig
 
 if "editor_mode" not in st.session_state:
-    st.session_state.editor_mode = False
+    st.session_state.editor_mode = False  # 최초 실행은 시연 모드
+
+if "prev_editor_mode" not in st.session_state:
+    st.session_state.prev_editor_mode = st.session_state.editor_mode
 
 if "is_adding" not in st.session_state:
     st.session_state.is_adding = False
@@ -140,10 +163,10 @@ if "selected_block" not in st.session_state:
 if "viewer_version" not in st.session_state:
     st.session_state.viewer_version = 0
 
-if "prev_editor_mode" not in st.session_state:
-    st.session_state.prev_editor_mode = st.session_state.editor_mode
 
-
+# -----------------------------
+# Helpers
+# -----------------------------
 def reset_adding_state():
     st.session_state.is_adding = False
     st.session_state.first_point = None
@@ -153,11 +176,15 @@ def bump_viewer():
     st.session_state.viewer_version += 1
 
 
+def clear_popup_state():
+    st.session_state.selected_block = None
+
+
 def go_prev():
     if st.session_state.page_idx > 0:
         st.session_state.page_idx -= 1
         reset_adding_state()
-        st.session_state.selected_block = None
+        clear_popup_state()
         bump_viewer()
 
 
@@ -165,7 +192,7 @@ def go_next():
     if st.session_state.page_idx < len(PAGES) - 1:
         st.session_state.page_idx += 1
         reset_adding_state()
-        st.session_state.selected_block = None
+        clear_popup_state()
         bump_viewer()
 
 
@@ -210,6 +237,9 @@ def find_block_by_point(blocks: list[dict], x: int, y: int):
     return None
 
 
+# -----------------------------
+# Dialog
+# -----------------------------
 @st.dialog(" ", width="large")
 def show_block_dialog():
     sel = st.session_state.selected_block
@@ -403,6 +433,9 @@ def show_block_dialog():
     components_html(popup_html, height=430, scrolling=False)
 
 
+# -----------------------------
+# Top UI
+# -----------------------------
 current_page = get_current_page()
 page_name = current_page["name"]
 image_path = Path(current_page["file"])
@@ -433,28 +466,18 @@ with top3:
         disabled=(st.session_state.page_idx == len(PAGES) - 1),
     )
 
-mode1, mode2, mode3 = st.columns([1, 1, 3])
+mode1, mode2 = st.columns([1, 3])
 
 with mode1:
     st.toggle("편집 모드", key="editor_mode")
 
 with mode2:
-    if st.button("파일 다시 읽기", width="stretch"):
-        st.session_state.page_idx = 0
-        st.session_state.blocks = deepcopy(read_blocks_from_disk())
-        st.session_state.editor_mode = False
-        reset_adding_state()
-        st.session_state.selected_block = None
-        bump_viewer()
-        st.rerun()
-
-with mode3:
     st.info("편집 모드" if st.session_state.editor_mode else "시연 모드")
 
 if st.session_state.editor_mode != st.session_state.prev_editor_mode:
     st.session_state.prev_editor_mode = st.session_state.editor_mode
-    st.session_state.selected_block = None
     reset_adding_state()
+    clear_popup_state()
     bump_viewer()
     st.rerun()
 
@@ -463,6 +486,9 @@ if not image_path.exists():
     st.stop()
 
 
+# -----------------------------
+# Main interactive viewer
+# -----------------------------
 @st.fragment
 def interactive_panel():
     page = get_current_page()
@@ -487,7 +513,8 @@ def interactive_panel():
         f"{page_name_local}_"
         f"{st.session_state.viewer_version}_"
         f"{'edit' if st.session_state.editor_mode else 'demo'}_"
-        f"{len(blocks_for_page)}"
+        f"{len(blocks_for_page)}_"
+        f"{st.session_state.is_adding}"
     )
 
     if st.session_state.editor_mode:
@@ -497,7 +524,7 @@ def interactive_panel():
             if st.button("추가 시작", width="stretch", key=f"add_{page_name_local}"):
                 st.session_state.is_adding = True
                 st.session_state.first_point = None
-                st.session_state.selected_block = None
+                clear_popup_state()
                 bump_viewer()
                 st.rerun()
 
