@@ -19,12 +19,9 @@ PAGES = [
 
 BLOCKS_FILE = Path("data/blocks.json")
 
-# S23+ 세로 화면 기준으로 잡은 표시 박스 느낌
+# S23+ 세로 화면 기준으로 대략 맞춘 표시 크기
 DISPLAY_MAX_W = 410
 DISPLAY_MAX_H = 700
-
-# 팝업 기본 배율 단계
-ZOOM_LEVELS = [0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
 
 
 @st.cache_data
@@ -61,7 +58,13 @@ def fit_size(orig_w: int, orig_h: int, max_w: int, max_h: int) -> tuple[int, int
 
 
 @st.cache_data
-def render_display_image(image_bytes: bytes, blocks_json: str, max_w: int, max_h: int, line_width: int = 4) -> bytes:
+def render_display_image(
+    image_bytes: bytes,
+    blocks_json: str,
+    max_w: int,
+    max_h: int,
+    line_width: int = 4,
+) -> bytes:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     orig_w, orig_h = image.size
     disp_w, disp_h, scale = fit_size(orig_w, orig_h, max_w, max_h)
@@ -113,6 +116,9 @@ def bytes_to_data_uri(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64,{encoded}"
 
 
+# -----------------------------
+# Session state
+# -----------------------------
 if "page_idx" not in st.session_state:
     st.session_state.page_idx = 0
 
@@ -132,13 +138,20 @@ if "first_point" not in st.session_state:
 if "selected_block" not in st.session_state:
     st.session_state.selected_block = None
 
-if "zoom_idx" not in st.session_state:
-    st.session_state.zoom_idx = 1  # 1.0
+if "page_nonce" not in st.session_state:
+    st.session_state.page_nonce = 0
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def reset_adding_state():
     st.session_state.is_adding = False
     st.session_state.first_point = None
+
+
+def remount_viewer():
+    st.session_state.page_nonce += 1
 
 
 def go_prev():
@@ -146,6 +159,7 @@ def go_prev():
         st.session_state.page_idx -= 1
         reset_adding_state()
         st.session_state.selected_block = None
+        remount_viewer()
 
 
 def go_next():
@@ -153,6 +167,7 @@ def go_next():
         st.session_state.page_idx += 1
         reset_adding_state()
         st.session_state.selected_block = None
+        remount_viewer()
 
 
 def get_current_page():
@@ -196,6 +211,9 @@ def find_block_by_point(blocks: list[dict], x: int, y: int):
     return None
 
 
+# -----------------------------
+# Dialog
+# -----------------------------
 @st.dialog(" ", width="large")
 def show_block_dialog():
     sel = st.session_state.selected_block
@@ -216,61 +234,186 @@ def show_block_dialog():
     cropped_bytes = crop_block_bytes(image_bytes, json.dumps(block, ensure_ascii=False), pad=24)
     data_uri = bytes_to_data_uri(cropped_bytes)
 
-    z1, z2, z3, z4 = st.columns([1, 1, 1, 2])
-    with z1:
-        if st.button("－", width="stretch", key="zoom_out"):
-            st.session_state.zoom_idx = max(0, st.session_state.zoom_idx - 1)
-            st.rerun()
-    with z2:
-        if st.button("＋", width="stretch", key="zoom_in"):
-            st.session_state.zoom_idx = min(len(ZOOM_LEVELS) - 1, st.session_state.zoom_idx + 1)
-            st.rerun()
-    with z3:
-        if st.button("기본", width="stretch", key="zoom_reset"):
-            st.session_state.zoom_idx = 1
-            st.rerun()
-    with z4:
-        if st.button("닫기", width="stretch", key="close_dialog"):
-            st.session_state.selected_block = None
-            st.session_state.zoom_idx = 1
-            st.rerun()
-
-    zoom = ZOOM_LEVELS[st.session_state.zoom_idx]
-
-    # 좌상단 기준(top-left) + 스크롤 박스
-    # 처음엔 세로에 맞춰 보이게(height:100%), 확대하면 그 비율대로 커짐
+    # 버튼 없이, 핀치줌/드래그 전용
     popup_html = f"""
-    <div style="
-        height: 44vh;
-        min-height: 300px;
-        max-height: 420px;
-        overflow: auto;
-        border: 1px solid #ddd;
-        border-radius: 10px;
-        background: #ffffff;
-        padding: 0;
-    ">
-        <div style="
-            height: 100%;
-            width: max-content;
-            min-width: 100%;
-        ">
-            <img
-                src="{data_uri}"
-                style="
-                    height: calc(100% * {zoom});
-                    width: auto;
-                    max-width: none;
-                    display: block;
-                    transform-origin: top left;
-                "
-            />
-        </div>
-    </div>
+    <!doctype html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+      <style>
+        html, body {{
+          margin: 0;
+          padding: 0;
+          background: white;
+          overflow: hidden;
+        }}
+
+        #viewer {{
+          width: 100vw;
+          height: 46vh;
+          min-height: 300px;
+          max-height: 420px;
+          overflow: hidden;
+          position: relative;
+          background: white;
+          touch-action: none;
+        }}
+
+        #img {{
+          position: absolute;
+          left: 0;
+          top: 0;
+          transform-origin: 0 0;
+          user-select: none;
+          -webkit-user-drag: none;
+          -webkit-user-select: none;
+          max-width: none;
+          max-height: none;
+          will-change: transform;
+        }}
+      </style>
+    </head>
+    <body>
+      <div id="viewer">
+        <img id="img" src="{data_uri}" />
+      </div>
+
+      <script>
+        const viewer = document.getElementById("viewer");
+        const img = document.getElementById("img");
+
+        let scale = 1;
+        let minScale = 1;
+        let maxScale = 5;
+        let tx = 0;
+        let ty = 0;
+
+        let pointers = new Map();
+        let startDist = 0;
+        let startScale = 1;
+        let lastX = 0;
+        let lastY = 0;
+        let dragging = false;
+
+        function clamp(val, min, max) {{
+          return Math.max(min, Math.min(max, val));
+        }}
+
+        function getDistance(a, b) {{
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          return Math.sqrt(dx * dx + dy * dy);
+        }}
+
+        function applyTransform() {{
+          img.style.transform = `translate(${{tx}}px, ${{ty}}px) scale(${{scale}})`;
+        }}
+
+        function fitToHeight() {{
+          const vh = viewer.clientHeight;
+          const naturalW = img.naturalWidth;
+          const naturalH = img.naturalHeight;
+
+          minScale = vh / naturalH;
+          scale = minScale;
+
+          const scaledW = naturalW * scale;
+          tx = 0;
+          ty = 0;
+
+          if (scaledW < viewer.clientWidth) {{
+            tx = (viewer.clientWidth - scaledW) / 2;
+          }}
+
+          applyTransform();
+        }}
+
+        function zoomAround(cx, cy, newScale) {{
+          newScale = clamp(newScale, minScale, maxScale);
+          const worldX = (cx - tx) / scale;
+          const worldY = (cy - ty) / scale;
+
+          scale = newScale;
+          tx = cx - worldX * scale;
+          ty = cy - worldY * scale;
+
+          applyTransform();
+        }}
+
+        img.onload = () => {{
+          fitToHeight();
+        }};
+
+        viewer.addEventListener("wheel", (e) => {{
+          e.preventDefault();
+          const factor = e.deltaY < 0 ? 1.1 : 0.9;
+          const rect = viewer.getBoundingClientRect();
+          zoomAround(e.clientX - rect.left, e.clientY - rect.top, scale * factor);
+        }}, {{ passive: false }});
+
+        viewer.addEventListener("pointerdown", (e) => {{
+          viewer.setPointerCapture(e.pointerId);
+          pointers.set(e.pointerId, {{ x: e.clientX, y: e.clientY }});
+
+          if (pointers.size === 1) {{
+            dragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+          }} else if (pointers.size === 2) {{
+            dragging = false;
+            const pts = Array.from(pointers.values());
+            startDist = getDistance(pts[0], pts[1]);
+            startScale = scale;
+          }}
+        }});
+
+        viewer.addEventListener("pointermove", (e) => {{
+          if (!pointers.has(e.pointerId)) return;
+
+          pointers.set(e.pointerId, {{ x: e.clientX, y: e.clientY }});
+
+          if (pointers.size === 1 && dragging) {{
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            tx += dx;
+            ty += dy;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            applyTransform();
+          }} else if (pointers.size === 2) {{
+            const pts = Array.from(pointers.values());
+            const dist = getDistance(pts[0], pts[1]);
+            if (startDist > 0) {{
+              const rect = viewer.getBoundingClientRect();
+              const cx = ((pts[0].x + pts[1].x) / 2) - rect.left;
+              const cy = ((pts[0].y + pts[1].y) / 2) - rect.top;
+              zoomAround(cx, cy, startScale * (dist / startDist));
+            }}
+          }}
+        }});
+
+        function endPointer(e) {{
+          pointers.delete(e.pointerId);
+          if (pointers.size < 2) startDist = 0;
+          if (pointers.size === 0) dragging = false;
+        }}
+
+        viewer.addEventListener("pointerup", endPointer);
+        viewer.addEventListener("pointercancel", endPointer);
+        viewer.addEventListener("pointerleave", endPointer);
+
+        window.addEventListener("resize", fitToHeight);
+      </script>
+    </body>
+    </html>
     """
+
     components_html(popup_html, height=430, scrolling=False)
 
 
+# -----------------------------
+# UI
+# -----------------------------
 current_page = get_current_page()
 page_name = current_page["name"]
 image_path = Path(current_page["file"])
@@ -304,7 +447,9 @@ with top3:
 mode1, mode2, mode3 = st.columns([1, 1, 3])
 
 with mode1:
-    st.toggle("편집 모드", key="editor_mode")
+    changed = st.toggle("편집 모드", key="editor_mode")
+    # 토글 시 컴포넌트 재마운트
+    remount_viewer()
 
 with mode2:
     if st.button("기본값 재로드", width="stretch"):
@@ -313,14 +458,11 @@ with mode2:
         st.session_state.editor_mode = False
         reset_adding_state()
         st.session_state.selected_block = None
-        st.session_state.zoom_idx = 1
+        remount_viewer()
         st.rerun()
 
 with mode3:
-    if st.session_state.editor_mode:
-        st.info("편집 모드")
-    else:
-        st.info("시연 모드")
+    st.info("편집 모드" if st.session_state.editor_mode else "시연 모드")
 
 if not image_path.exists():
     st.error(f"이미지 파일을 찾을 수 없습니다: {image_path}")
@@ -346,6 +488,15 @@ def interactive_panel():
     )
     display_image = Image.open(io.BytesIO(display_bytes))
 
+    viewer_key = (
+        f"viewer_"
+        f"{page_name_local}_"
+        f"{st.session_state.page_nonce}_"
+        f"{'edit' if st.session_state.editor_mode else 'demo'}_"
+        f"{len(blocks_for_page)}_"
+        f"{st.session_state.is_adding}"
+    )
+
     if st.session_state.editor_mode:
         c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
 
@@ -354,16 +505,20 @@ def interactive_panel():
                 st.session_state.is_adding = True
                 st.session_state.first_point = None
                 st.session_state.selected_block = None
+                remount_viewer()
+                st.rerun()
 
         with c2:
             if st.button("마지막 삭제", width="stretch", key=f"del_{page_name_local}"):
                 remove_last_block(page_name_local)
                 reset_adding_state()
+                remount_viewer()
                 st.rerun()
 
         with c3:
             if st.button("추가 취소", width="stretch", key=f"cancel_{page_name_local}"):
                 reset_adding_state()
+                remount_viewer()
                 st.rerun()
 
         with c4:
@@ -376,11 +531,10 @@ def interactive_panel():
 
         clicked = streamlit_image_coordinates(
             display_image,
-            key=f"edit_{page_name_local}_{len(blocks_for_page)}_{st.session_state.is_adding}_{st.session_state.first_point}",
+            key=viewer_key,
         )
 
         if clicked and st.session_state.is_adding:
-            # 표시 이미지 좌표 -> 원본 좌표 역변환
             x = int(round(clicked["x"] / scale))
             y = int(round(clicked["y"] / scale))
 
@@ -389,18 +543,20 @@ def interactive_panel():
 
             if st.session_state.first_point is None:
                 st.session_state.first_point = {"x": x, "y": y}
+                remount_viewer()
                 st.rerun()
             else:
                 x1 = st.session_state.first_point["x"]
                 y1 = st.session_state.first_point["y"]
                 add_block(page_name_local, x1, y1, x, y)
                 reset_adding_state()
+                remount_viewer()
                 st.rerun()
 
     else:
         clicked = streamlit_image_coordinates(
             display_image,
-            key=f"demo_{page_name_local}_{len(blocks_for_page)}",
+            key=viewer_key,
         )
 
         if clicked:
@@ -416,10 +572,8 @@ def interactive_panel():
                     "page_name": page_name_local,
                     "block_id": matched["id"],
                 }
-                st.session_state.zoom_idx = 1
                 show_block_dialog()
 
-    # 아래 미리보기/데이터 출력 제거
     st.download_button(
         "blocks.json 다운로드",
         data=get_json_text(),
@@ -430,6 +584,3 @@ def interactive_panel():
 
 
 interactive_panel()
-
-if st.session_state.selected_block is not None and not st.session_state.editor_mode:
-    show_block_dialog()
