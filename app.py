@@ -19,6 +19,13 @@ PAGES = [
 
 BLOCKS_FILE = Path("data/blocks.json")
 
+# S23+ 세로 화면 기준으로 잡은 표시 박스 느낌
+DISPLAY_MAX_W = 410
+DISPLAY_MAX_H = 700
+
+# 팝업 기본 배율 단계
+ZOOM_LEVELS = [0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+
 
 @st.cache_data
 def load_default_blocks() -> dict:
@@ -40,37 +47,55 @@ def load_image_bytes(image_path: str) -> bytes:
 
 
 @st.cache_data
-def draw_blocks_preview_cached(image_bytes: bytes, blocks_json: str, line_width: int = 6) -> bytes:
+def load_image_size(image_bytes: bytes) -> tuple[int, int]:
+    with Image.open(io.BytesIO(image_bytes)) as im:
+        return im.size
+
+
+def fit_size(orig_w: int, orig_h: int, max_w: int, max_h: int) -> tuple[int, int, float]:
+    scale = min(max_w / orig_w, max_h / orig_h)
+    scale = min(scale, 1.0)
+    new_w = max(1, int(orig_w * scale))
+    new_h = max(1, int(orig_h * scale))
+    return new_w, new_h, scale
+
+
+@st.cache_data
+def render_display_image(image_bytes: bytes, blocks_json: str, max_w: int, max_h: int, line_width: int = 4) -> bytes:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    orig_w, orig_h = image.size
+    disp_w, disp_h, scale = fit_size(orig_w, orig_h, max_w, max_h)
+
+    if scale < 1.0:
+        image = image.resize((disp_w, disp_h), Image.LANCZOS)
+
     draw = ImageDraw.Draw(image)
     blocks = json.loads(blocks_json)
 
     for block in blocks:
-        x, y, w, h = block["x"], block["y"], block["w"], block["h"]
+        x = int(block["x"] * scale)
+        y = int(block["y"] * scale)
+        w = max(1, int(block["w"] * scale))
+        h = max(1, int(block["h"] * scale))
+
         draw.rectangle(
             [(x, y), (x + w, y + h)],
             outline=(255, 0, 0),
             width=line_width,
         )
 
-        label_bg_w = 64
-        draw.rectangle(
-            [(x + 6, max(0, y - 30)), (x + 6 + label_bg_w, max(0, y - 4))],
-            fill=(255, 255, 255),
-        )
-        draw.text((x + 10, max(0, y - 28)), block["id"], fill=(255, 0, 0))
-
     buf = io.BytesIO()
-    image.save(buf, format="JPEG", quality=95)
+    image.save(buf, format="JPEG", quality=92)
     return buf.getvalue()
 
 
 @st.cache_data
-def crop_block_cached(image_bytes: bytes, block_json: str, pad: int = 24) -> bytes:
+def crop_block_bytes(image_bytes: bytes, block_json: str, pad: int = 24) -> bytes:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     block = json.loads(block_json)
 
     x, y, w, h = block["x"], block["y"], block["w"], block["h"]
+
     left = max(0, x - pad)
     top = max(0, y - pad)
     right = min(image.width, x + w + pad)
@@ -94,8 +119,9 @@ if "page_idx" not in st.session_state:
 if "blocks" not in st.session_state:
     st.session_state.blocks = deepcopy(load_default_blocks())
 
+# 최초 실행은 시연 모드
 if "editor_mode" not in st.session_state:
-    st.session_state.editor_mode = True
+    st.session_state.editor_mode = False
 
 if "is_adding" not in st.session_state:
     st.session_state.is_adding = False
@@ -105,6 +131,9 @@ if "first_point" not in st.session_state:
 
 if "selected_block" not in st.session_state:
     st.session_state.selected_block = None
+
+if "zoom_idx" not in st.session_state:
+    st.session_state.zoom_idx = 1  # 1.0
 
 
 def reset_adding_state():
@@ -167,7 +196,7 @@ def find_block_by_point(blocks: list[dict], x: int, y: int):
     return None
 
 
-@st.dialog("블록 확대", width="large")
+@st.dialog("", width="large")
 def show_block_dialog():
     sel = st.session_state.selected_block
     if not sel:
@@ -184,44 +213,62 @@ def show_block_dialog():
         return
 
     image_bytes = load_image_bytes(page["file"])
-    cropped_bytes = crop_block_cached(image_bytes, json.dumps(block, ensure_ascii=False), pad=24)
+    cropped_bytes = crop_block_bytes(image_bytes, json.dumps(block, ensure_ascii=False), pad=24)
     data_uri = bytes_to_data_uri(cropped_bytes)
 
-    st.caption(f"{page_name} / {block_id}")
+    z1, z2, z3, z4 = st.columns([1, 1, 1, 2])
+    with z1:
+        if st.button("－", width="stretch", key="zoom_out"):
+            st.session_state.zoom_idx = max(0, st.session_state.zoom_idx - 1)
+            st.rerun()
+    with z2:
+        if st.button("＋", width="stretch", key="zoom_in"):
+            st.session_state.zoom_idx = min(len(ZOOM_LEVELS) - 1, st.session_state.zoom_idx + 1)
+            st.rerun()
+    with z3:
+        if st.button("기본", width="stretch", key="zoom_reset"):
+            st.session_state.zoom_idx = 1
+            st.rerun()
+    with z4:
+        if st.button("닫기", width="stretch", key="close_dialog"):
+            st.session_state.selected_block = None
+            st.session_state.zoom_idx = 1
+            st.rerun()
 
-    # S23+ 기준으로 너무 세로가 길지 않게, 대신 이미지가 세로 기준으로 꽉 차게.
+    zoom = ZOOM_LEVELS[st.session_state.zoom_idx]
+
+    # 좌상단 기준(top-left) + 스크롤 박스
+    # 처음엔 세로에 맞춰 보이게(height:100%), 확대하면 그 비율대로 커짐
     popup_html = f"""
     <div style="
-        height: 52vh;
-        min-height: 360px;
-        max-height: 520px;
+        height: 44vh;
+        min-height: 300px;
+        max-height: 420px;
         overflow: auto;
         border: 1px solid #ddd;
         border-radius: 10px;
-        background: #fafafa;
-        display: flex;
-        align-items: flex-start;
-        justify-content: center;
-        padding: 8px;
+        background: #ffffff;
+        padding: 0;
     ">
-        <img
-            src="{data_uri}"
-            style="
-                height: calc(52vh - 24px);
-                min-height: 336px;
-                max-height: 496px;
-                width: auto;
-                max-width: none;
-                display: block;
-            "
-        />
+        <div style="
+            height: 100%;
+            width: max-content;
+            min-width: 100%;
+        ">
+            <img
+                src="{data_uri}"
+                style="
+                    height: calc(100% * {zoom});
+                    width: auto;
+                    max-width: none;
+                    display: block;
+                    transform-origin: top left;
+                "
+            />
+        </div>
     </div>
     """
     components_html(popup_html, height=430, scrolling=False)
-
-    if st.button("닫기", use_container_width=True):
-        st.session_state.selected_block = None
-        st.rerun()
 
 
 current_page = get_current_page()
@@ -229,7 +276,6 @@ page_name = current_page["name"]
 image_path = Path(current_page["file"])
 
 st.title("마트 전단지 블록 편집 / 시연")
-st.caption(f"{st.session_state.page_idx + 1} / {len(PAGES)}")
 
 top1, top2, top3 = st.columns([1, 2, 1])
 
@@ -237,13 +283,13 @@ with top1:
     st.button(
         "◀ 이전 페이지",
         on_click=go_prev,
-        use_container_width=True,
+        width="stretch",
         disabled=(st.session_state.page_idx == 0),
     )
 
 with top2:
     st.markdown(
-        f"<div style='text-align:center; font-size:24px; font-weight:700;'>{page_name}</div>",
+        f"<div style='text-align:center; font-size:22px; font-weight:700;'>{page_name}</div>",
         unsafe_allow_html=True,
     )
 
@@ -251,31 +297,30 @@ with top3:
     st.button(
         "다음 페이지 ▶",
         on_click=go_next,
-        use_container_width=True,
+        width="stretch",
         disabled=(st.session_state.page_idx == len(PAGES) - 1),
     )
 
-mode_col1, mode_col2, mode_col3 = st.columns([1, 1, 4])
+mode1, mode2, mode3 = st.columns([1, 1, 3])
 
-with mode_col1:
+with mode1:
     st.toggle("편집 모드", key="editor_mode")
 
-with mode_col2:
-    if st.button("기본값으로 초기화", use_container_width=True):
+with mode2:
+    if st.button("기본값 재로드", width="stretch"):
         st.session_state.page_idx = 0
         st.session_state.blocks = deepcopy(load_default_blocks())
-        st.session_state.editor_mode = True
+        st.session_state.editor_mode = False
         reset_adding_state()
         st.session_state.selected_block = None
+        st.session_state.zoom_idx = 1
         st.rerun()
 
-with mode_col3:
+with mode3:
     if st.session_state.editor_mode:
-        st.info("편집 모드: 블록 추가/삭제 가능")
+        st.info("편집 모드")
     else:
-        st.info("시연 모드: 블록 클릭 시 즉시 확대 팝업")
-
-st.divider()
+        st.info("시연 모드")
 
 if not image_path.exists():
     st.error(f"이미지 파일을 찾을 수 없습니다: {image_path}")
@@ -289,51 +334,58 @@ def interactive_panel():
     blocks_for_page = st.session_state.blocks[page_name_local]
 
     image_bytes = load_image_bytes(page["file"])
-    preview_bytes = draw_blocks_preview_cached(
+    orig_w, orig_h = load_image_size(image_bytes)
+    disp_w, disp_h, scale = fit_size(orig_w, orig_h, DISPLAY_MAX_W, DISPLAY_MAX_H)
+
+    display_bytes = render_display_image(
         image_bytes,
         json.dumps(blocks_for_page, ensure_ascii=False, sort_keys=True),
-        line_width=6,
+        DISPLAY_MAX_W,
+        DISPLAY_MAX_H,
+        line_width=4,
     )
-    preview_image = Image.open(io.BytesIO(preview_bytes))
+    display_image = Image.open(io.BytesIO(display_bytes))
 
     if st.session_state.editor_mode:
         c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
 
         with c1:
-            if st.button("추가 시작", use_container_width=True, key=f"add_{page_name_local}"):
+            if st.button("추가 시작", width="stretch", key=f"add_{page_name_local}"):
                 st.session_state.is_adding = True
                 st.session_state.first_point = None
                 st.session_state.selected_block = None
 
         with c2:
-            if st.button("마지막 삭제", use_container_width=True, key=f"del_{page_name_local}"):
+            if st.button("마지막 삭제", width="stretch", key=f"del_{page_name_local}"):
                 remove_last_block(page_name_local)
                 reset_adding_state()
                 st.rerun()
 
         with c3:
-            if st.button("추가 취소", use_container_width=True, key=f"cancel_{page_name_local}"):
+            if st.button("추가 취소", width="stretch", key=f"cancel_{page_name_local}"):
                 reset_adding_state()
                 st.rerun()
 
         with c4:
-            st.write(f"현재 블록 수: **{len(blocks_for_page)}**")
+            st.write(f"블록 수: **{len(blocks_for_page)}**")
 
         if st.session_state.is_adding and st.session_state.first_point is None:
-            st.info("좌상단 점을 클릭하세요.")
+            st.info("좌상단 클릭")
         elif st.session_state.is_adding and st.session_state.first_point is not None:
-            st.info("우하단 점을 클릭하세요.")
-        else:
-            st.info("‘추가 시작’을 누르면 블록을 새로 만들 수 있습니다.")
+            st.info("우하단 클릭")
 
         clicked = streamlit_image_coordinates(
-            preview_image,
+            display_image,
             key=f"edit_{page_name_local}_{len(blocks_for_page)}_{st.session_state.is_adding}_{st.session_state.first_point}",
         )
 
         if clicked and st.session_state.is_adding:
-            x = int(clicked["x"])
-            y = int(clicked["y"])
+            # 표시 이미지 좌표 -> 원본 좌표 역변환
+            x = int(round(clicked["x"] / scale))
+            y = int(round(clicked["y"] / scale))
+
+            x = min(max(x, 0), orig_w)
+            y = min(max(y, 0), orig_h)
 
             if st.session_state.first_point is None:
                 st.session_state.first_point = {"x": x, "y": y}
@@ -346,45 +398,38 @@ def interactive_panel():
                 st.rerun()
 
     else:
-        info1, info2 = st.columns([1, 2])
-        with info1:
-            st.write(f"현재 블록 수: **{len(blocks_for_page)}**")
-        with info2:
-            st.info("블록 안쪽을 누르면 바로 확대됩니다.")
-
         clicked = streamlit_image_coordinates(
-            preview_image,
+            display_image,
             key=f"demo_{page_name_local}_{len(blocks_for_page)}",
         )
 
         if clicked:
-            x = int(clicked["x"])
-            y = int(clicked["y"])
+            x = int(round(clicked["x"] / scale))
+            y = int(round(clicked["y"] / scale))
+
+            x = min(max(x, 0), orig_w)
+            y = min(max(y, 0), orig_h)
+
             matched = find_block_by_point(blocks_for_page, x, y)
             if matched is not None:
                 st.session_state.selected_block = {
                     "page_name": page_name_local,
                     "block_id": matched["id"],
                 }
+                st.session_state.zoom_idx = 1
                 show_block_dialog()
 
-    st.divider()
-    st.subheader("현재 페이지 블록 데이터")
-    st.code(
-        json.dumps(st.session_state.blocks[page_name_local], ensure_ascii=False, indent=2),
-        language="json",
+    # 아래 미리보기/데이터 출력 제거
+    st.download_button(
+        "blocks.json 다운로드",
+        data=get_json_text(),
+        file_name="blocks.json",
+        mime="application/json",
+        width="stretch",
     )
 
 
 interactive_panel()
-
-st.download_button(
-    "전체 blocks.json 다운로드",
-    data=get_json_text(),
-    file_name="blocks.json",
-    mime="application/json",
-    use_container_width=True,
-)
 
 if st.session_state.selected_block is not None and not st.session_state.editor_mode:
     show_block_dialog()
