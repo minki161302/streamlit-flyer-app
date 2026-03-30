@@ -11,9 +11,9 @@ st.set_page_config(
 # 1) 페이지 파일 목록
 # -----------------------------
 PAGES = [
-    {"name": "page1", "file": "data/page1.png"},
-    {"name": "page2", "file": "data/page2.png"},
-    {"name": "page3", "file": "data/page3.png"},
+    {"name": "page1", "file": "data/page1.jpg"},
+    {"name": "page2", "file": "data/page2.jpg"},
+    {"name": "page3", "file": "data/page3.jpg"},
 ]
 
 # -----------------------------
