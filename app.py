@@ -196,7 +196,7 @@ def find_block_by_point(blocks: list[dict], x: int, y: int):
     return None
 
 
-@st.dialog("", width="large")
+@st.dialog(" ", width="large")
 def show_block_dialog():
     sel = st.session_state.selected_block
     if not sel:
