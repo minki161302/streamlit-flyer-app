@@ -489,7 +489,6 @@ with mode1:
 
 with mode2:
     st.info("편집 모드" if st.session_state.editor_mode else "시연 모드")
-
 # 토글 변화시에만 remount
 if st.session_state.editor_mode != st.session_state.prev_editor_mode:
     st.session_state.prev_editor_mode = st.session_state.editor_mode
