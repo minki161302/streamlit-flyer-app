@@ -14,8 +14,8 @@ st.set_page_config(page_title="마트 전단지 블록 편집 / 시연", layout=
 DATA_DIR = Path("data")
 BLOCKS_FILE = DATA_DIR / "blocks.json"
 
-DISPLAY_MAX_W = 410
-DISPLAY_MAX_H = 700
+DISPLAY_MAX_W = 350
+DISPLAY_MAX_H = 620
 
 
 # -----------------------------
@@ -446,7 +446,7 @@ def show_block_dialog():
     </html>
     """
 
-    components_html(popup_html, height=430, scrolling=False)
+    components_html(popup_html, height=360, scrolling=False)
 
 
 # -----------------------------
