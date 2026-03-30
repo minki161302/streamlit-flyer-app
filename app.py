@@ -1,7 +1,7 @@
 import base64
-import hashlib
 import io
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import streamlit as st
@@ -11,59 +11,33 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 
 st.set_page_config(page_title="마트 전단지 블록 편집 / 시연", layout="wide")
 
-DATA_DIR = Path("data")
-BLOCKS_FILE = DATA_DIR / "blocks.json"
+PAGES = [
+    {"name": "page1", "file": "data/page1.jpg"},
+    {"name": "page2", "file": "data/page2.jpg"},
+    {"name": "page3", "file": "data/page3.jpg"},
+]
 
+BLOCKS_FILE = Path("data/blocks.json")
+
+# S23+ 세로 화면 기준으로 대략 맞춘 표시 크기
 DISPLAY_MAX_W = 410
 DISPLAY_MAX_H = 700
 
 
-# -----------------------------
-# 페이지 목록: data 폴더의 모든 jpg를 가나다순(문자열 정렬)
-# -----------------------------
-def discover_pages():
-    jpg_files = sorted(DATA_DIR.glob("*.jpg"), key=lambda p: p.name)
-    return [{"name": p.stem, "file": str(p)} for p in jpg_files]
-
-
-PAGES = discover_pages()
-
-if not PAGES:
-    st.error("data 폴더에 jpg 파일이 없습니다.")
-    st.stop()
-
-
-# -----------------------------
-# blocks.json 로딩
-# -----------------------------
-def get_blocks_file_signature() -> str:
-    if not BLOCKS_FILE.exists():
-        return "missing"
-    data = BLOCKS_FILE.read_bytes()
-    return hashlib.md5(data).hexdigest()
-
-
-def read_blocks_from_disk() -> dict:
+@st.cache_data
+def load_default_blocks() -> dict:
     base = {page["name"]: [] for page in PAGES}
-
-    if not BLOCKS_FILE.exists():
-        return base
-
-    try:
-        loaded = json.loads(BLOCKS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return base
-
-    for page_name in base:
-        if page_name in loaded and isinstance(loaded[page_name], list):
-            base[page_name] = loaded[page_name]
-
+    if BLOCKS_FILE.exists():
+        try:
+            loaded = json.loads(BLOCKS_FILE.read_text(encoding="utf-8"))
+            for page in base:
+                if page in loaded and isinstance(loaded[page], list):
+                    base[page] = loaded[page]
+        except Exception:
+            pass
     return base
 
 
-# -----------------------------
-# 캐시 함수
-# -----------------------------
 @st.cache_data
 def load_image_bytes(image_path: str) -> bytes:
     return Path(image_path).read_bytes()
@@ -143,28 +117,17 @@ def bytes_to_data_uri(image_bytes: bytes, mime: str = "image/jpeg") -> str:
 
 
 # -----------------------------
-# 세션 상태 초기화
+# Session state
 # -----------------------------
-current_sig = get_blocks_file_signature()
-
 if "page_idx" not in st.session_state:
     st.session_state.page_idx = 0
 
-if "blocks_file_sig" not in st.session_state:
-    st.session_state.blocks_file_sig = current_sig
-
 if "blocks" not in st.session_state:
-    st.session_state.blocks = read_blocks_from_disk()
-elif st.session_state.blocks_file_sig != current_sig:
-    # blocks.json이 바뀌면 자동 반영
-    st.session_state.blocks = read_blocks_from_disk()
-    st.session_state.blocks_file_sig = current_sig
+    st.session_state.blocks = deepcopy(load_default_blocks())
 
+# 최초 실행은 시연 모드
 if "editor_mode" not in st.session_state:
-    st.session_state.editor_mode = False  # 최초 실행은 시연 모드
-
-if "prev_editor_mode" not in st.session_state:
-    st.session_state.prev_editor_mode = st.session_state.editor_mode
+    st.session_state.editor_mode = False
 
 if "is_adding" not in st.session_state:
     st.session_state.is_adding = False
@@ -175,46 +138,40 @@ if "first_point" not in st.session_state:
 if "selected_block" not in st.session_state:
     st.session_state.selected_block = None
 
-if "viewer_version" not in st.session_state:
-    st.session_state.viewer_version = 0
+if "page_nonce" not in st.session_state:
+    st.session_state.page_nonce = 0
 
 
 # -----------------------------
-# 헬퍼
+# Helpers
 # -----------------------------
 def reset_adding_state():
     st.session_state.is_adding = False
     st.session_state.first_point = None
 
 
-def clear_popup_state():
-    st.session_state.selected_block = None
-
-
-def bump_viewer():
-    st.session_state.viewer_version += 1
-
-
-def get_current_page():
-    idx = min(st.session_state.page_idx, len(PAGES) - 1)
-    st.session_state.page_idx = idx
-    return PAGES[idx]
+def remount_viewer():
+    st.session_state.page_nonce += 1
 
 
 def go_prev():
     if st.session_state.page_idx > 0:
         st.session_state.page_idx -= 1
         reset_adding_state()
-        clear_popup_state()
-        bump_viewer()
+        st.session_state.selected_block = None
+        remount_viewer()
 
 
 def go_next():
     if st.session_state.page_idx < len(PAGES) - 1:
         st.session_state.page_idx += 1
         reset_adding_state()
-        clear_popup_state()
-        bump_viewer()
+        st.session_state.selected_block = None
+        remount_viewer()
+
+
+def get_current_page():
+    return PAGES[st.session_state.page_idx]
 
 
 def add_block(page_name: str, x1: int, y1: int, x2: int, y2: int):
@@ -255,7 +212,7 @@ def find_block_by_point(blocks: list[dict], x: int, y: int):
 
 
 # -----------------------------
-# 팝업
+# Dialog
 # -----------------------------
 @st.dialog(" ", width="large")
 def show_block_dialog():
@@ -267,15 +224,17 @@ def show_block_dialog():
     block_id = sel["block_id"]
 
     page = next((p for p in PAGES if p["name"] == page_name), None)
-    block = next((b for b in st.session_state.blocks.get(page_name, []) if b["id"] == block_id), None)
+    block = next((b for b in st.session_state.blocks[page_name] if b["id"] == block_id), None)
 
     if page is None or block is None:
+        st.warning("블록 정보를 찾지 못했습니다.")
         return
 
     image_bytes = load_image_bytes(page["file"])
     cropped_bytes = crop_block_bytes(image_bytes, json.dumps(block, ensure_ascii=False), pad=24)
     data_uri = bytes_to_data_uri(cropped_bytes)
 
+    # 버튼 없이, 핀치줌/드래그 전용
     popup_html = f"""
     <!doctype html>
     <html>
@@ -288,6 +247,7 @@ def show_block_dialog():
           background: white;
           overflow: hidden;
         }}
+
         #viewer {{
           width: 100vw;
           height: 46vh;
@@ -298,6 +258,7 @@ def show_block_dialog():
           background: white;
           touch-action: none;
         }}
+
         #img {{
           position: absolute;
           left: 0;
@@ -451,7 +412,7 @@ def show_block_dialog():
 
 
 # -----------------------------
-# 상단 UI
+# UI
 # -----------------------------
 current_page = get_current_page()
 page_name = current_page["name"]
@@ -483,132 +444,143 @@ with top3:
         disabled=(st.session_state.page_idx == len(PAGES) - 1),
     )
 
-mode1, mode2 = st.columns([1, 3])
+mode1, mode2, mode3 = st.columns([1, 1, 3])
 
 with mode1:
-    st.toggle("편집 모드", key="editor_mode")
+    changed = st.toggle("편집 모드", key="editor_mode")
+    # 토글 시 컴포넌트 재마운트
+    remount_viewer()
 
 with mode2:
-    st.info("편집 모드" if st.session_state.editor_mode else "시연 모드")
+    if st.button("기본값 재로드", width="stretch"):
+        st.session_state.page_idx = 0
+        st.session_state.blocks = deepcopy(load_default_blocks())
+        st.session_state.editor_mode = False
+        reset_adding_state()
+        st.session_state.selected_block = None
+        remount_viewer()
+        st.rerun()
 
-if st.session_state.editor_mode != st.session_state.prev_editor_mode:
-    st.session_state.prev_editor_mode = st.session_state.editor_mode
-    reset_adding_state()
-    clear_popup_state()
-    bump_viewer()
-    st.rerun()
+with mode3:
+    st.info("편집 모드" if st.session_state.editor_mode else "시연 모드")
 
 if not image_path.exists():
     st.error(f"이미지 파일을 찾을 수 없습니다: {image_path}")
     st.stop()
 
 
-# -----------------------------
-# 메인 뷰어
-# -----------------------------
-page_name_local = current_page["name"]
-blocks_for_page = st.session_state.blocks.get(page_name_local, [])
+@st.fragment
+def interactive_panel():
+    page = get_current_page()
+    page_name_local = page["name"]
+    blocks_for_page = st.session_state.blocks[page_name_local]
 
-image_bytes = load_image_bytes(current_page["file"])
-orig_w, orig_h = load_image_size(image_bytes)
-_, _, scale = fit_size(orig_w, orig_h, DISPLAY_MAX_W, DISPLAY_MAX_H)
+    image_bytes = load_image_bytes(page["file"])
+    orig_w, orig_h = load_image_size(image_bytes)
+    disp_w, disp_h, scale = fit_size(orig_w, orig_h, DISPLAY_MAX_W, DISPLAY_MAX_H)
 
-display_bytes = render_display_image(
-    image_bytes,
-    json.dumps(blocks_for_page, ensure_ascii=False, sort_keys=True),
-    DISPLAY_MAX_W,
-    DISPLAY_MAX_H,
-    line_width=4,
-)
-display_image = Image.open(io.BytesIO(display_bytes))
+    display_bytes = render_display_image(
+        image_bytes,
+        json.dumps(blocks_for_page, ensure_ascii=False, sort_keys=True),
+        DISPLAY_MAX_W,
+        DISPLAY_MAX_H,
+        line_width=4,
+    )
+    display_image = Image.open(io.BytesIO(display_bytes))
 
-viewer_key = (
-    f"viewer_"
-    f"{page_name_local}_"
-    f"{st.session_state.viewer_version}_"
-    f"{'edit' if st.session_state.editor_mode else 'demo'}_"
-    f"{len(blocks_for_page)}_"
-    f"{st.session_state.is_adding}"
-)
+    viewer_key = (
+        f"viewer_"
+        f"{page_name_local}_"
+        f"{st.session_state.page_nonce}_"
+        f"{'edit' if st.session_state.editor_mode else 'demo'}_"
+        f"{len(blocks_for_page)}_"
+        f"{st.session_state.is_adding}"
+    )
 
-if st.session_state.editor_mode:
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    if st.session_state.editor_mode:
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
 
-    with c1:
-        if st.button("추가 시작", width="stretch", key=f"add_{page_name_local}"):
-            st.session_state.is_adding = True
-            st.session_state.first_point = None
-            clear_popup_state()
-            bump_viewer()
-            st.rerun()
+        with c1:
+            if st.button("추가 시작", width="stretch", key=f"add_{page_name_local}"):
+                st.session_state.is_adding = True
+                st.session_state.first_point = None
+                st.session_state.selected_block = None
+                remount_viewer()
+                st.rerun()
 
-    with c2:
-        if st.button("마지막 삭제", width="stretch", key=f"del_{page_name_local}"):
-            remove_last_block(page_name_local)
-            reset_adding_state()
-            bump_viewer()
-            st.rerun()
+        with c2:
+            if st.button("마지막 삭제", width="stretch", key=f"del_{page_name_local}"):
+                remove_last_block(page_name_local)
+                reset_adding_state()
+                remount_viewer()
+                st.rerun()
 
-    with c3:
-        if st.button("추가 취소", width="stretch", key=f"cancel_{page_name_local}"):
-            reset_adding_state()
-            bump_viewer()
-            st.rerun()
+        with c3:
+            if st.button("추가 취소", width="stretch", key=f"cancel_{page_name_local}"):
+                reset_adding_state()
+                remount_viewer()
+                st.rerun()
 
-    with c4:
-        st.write(f"블록 수: **{len(blocks_for_page)}**")
+        with c4:
+            st.write(f"블록 수: **{len(blocks_for_page)}**")
 
-    if st.session_state.is_adding and st.session_state.first_point is None:
-        st.info("좌상단 클릭")
-    elif st.session_state.is_adding and st.session_state.first_point is not None:
-        st.info("우하단 클릭")
+        if st.session_state.is_adding and st.session_state.first_point is None:
+            st.info("좌상단 클릭")
+        elif st.session_state.is_adding and st.session_state.first_point is not None:
+            st.info("우하단 클릭")
 
-    clicked = streamlit_image_coordinates(display_image, key=viewer_key)
+        clicked = streamlit_image_coordinates(
+            display_image,
+            key=viewer_key,
+        )
 
-    if clicked and st.session_state.is_adding:
-        x = int(round(clicked["x"] / scale))
-        y = int(round(clicked["y"] / scale))
+        if clicked and st.session_state.is_adding:
+            x = int(round(clicked["x"] / scale))
+            y = int(round(clicked["y"] / scale))
 
-        x = min(max(x, 0), orig_w)
-        y = min(max(y, 0), orig_h)
+            x = min(max(x, 0), orig_w)
+            y = min(max(y, 0), orig_h)
 
-        if st.session_state.first_point is None:
-            st.session_state.first_point = {"x": x, "y": y}
-            bump_viewer()
-            st.rerun()
-        else:
-            x1 = st.session_state.first_point["x"]
-            y1 = st.session_state.first_point["y"]
-            add_block(page_name_local, x1, y1, x, y)
-            reset_adding_state()
-            bump_viewer()
-            st.rerun()
+            if st.session_state.first_point is None:
+                st.session_state.first_point = {"x": x, "y": y}
+                remount_viewer()
+                st.rerun()
+            else:
+                x1 = st.session_state.first_point["x"]
+                y1 = st.session_state.first_point["y"]
+                add_block(page_name_local, x1, y1, x, y)
+                reset_adding_state()
+                remount_viewer()
+                st.rerun()
 
-else:
-    clicked = streamlit_image_coordinates(display_image, key=viewer_key)
+    else:
+        clicked = streamlit_image_coordinates(
+            display_image,
+            key=viewer_key,
+        )
 
-    if clicked:
-        x = int(round(clicked["x"] / scale))
-        y = int(round(clicked["y"] / scale))
+        if clicked:
+            x = int(round(clicked["x"] / scale))
+            y = int(round(clicked["y"] / scale))
 
-        x = min(max(x, 0), orig_w)
-        y = min(max(y, 0), orig_h)
+            x = min(max(x, 0), orig_w)
+            y = min(max(y, 0), orig_h)
 
-        matched = find_block_by_point(blocks_for_page, x, y)
-        if matched is not None:
-            st.session_state.selected_block = {
-                "page_name": page_name_local,
-                "block_id": matched["id"],
-            }
-            st.rerun()
+            matched = find_block_by_point(blocks_for_page, x, y)
+            if matched is not None:
+                st.session_state.selected_block = {
+                    "page_name": page_name_local,
+                    "block_id": matched["id"],
+                }
+                show_block_dialog()
 
-st.download_button(
-    "blocks.json 다운로드",
-    data=get_json_text(),
-    file_name="blocks.json",
-    mime="application/json",
-    width="stretch",
-)
+    st.download_button(
+        "blocks.json 다운로드",
+        data=get_json_text(),
+        file_name="blocks.json",
+        mime="application/json",
+        width="stretch",
+    )
 
-if st.session_state.selected_block is not None and not st.session_state.editor_mode:
-    show_block_dialog()
+
+interactive_panel()
