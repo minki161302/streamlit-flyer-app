@@ -61,14 +61,14 @@ def read_blocks_from_disk() -> dict:
 
 
 # -----------------------------
-# 캐시 함수
+# 캐시 함수(안씀)
 # -----------------------------
-@st.cache_data
+#@st.cache_data
 def load_image_bytes(image_path: str) -> bytes:
     return Path(image_path).read_bytes()
 
 
-@st.cache_data
+#@st.cache_data
 def load_image_size(image_bytes: bytes) -> tuple[int, int]:
     with Image.open(io.BytesIO(image_bytes)) as im:
         return im.size
