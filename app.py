@@ -225,7 +225,7 @@ clicked = image_block_editor(
     editor_mode=st.session_state.editor_mode,
     adding=st.session_state.is_adding,
     first_point=st.session_state.first_point,
-    key=f"editor_{page_name}_{len(blocks_for_page)}_{st.session_state.is_adding}"
+    key=f"editor_{page_name}"
 )
 
 # -----------------------------
@@ -246,7 +246,7 @@ if clicked is not None and isinstance(clicked, dict):
                 add_block(page_name, x1, y1, x, y)
                 reset_adding_state()
                 st.rerun()
-
+st.write("clicked:", clicked)
 st.divider()
 
 preview_col1, preview_col2 = st.columns([3, 2])
