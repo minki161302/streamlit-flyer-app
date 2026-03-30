@@ -289,9 +289,9 @@ def show_block_dialog():
         }}
         #viewer {{
           width: 100vw;
-          height: 46vh;
-          min-height: 300px;
-          max-height: 420px;
+          height: 40vh;
+          min-height: 260px;
+          max-height: 340px;
           overflow: hidden;
           position: relative;
           background: white;
